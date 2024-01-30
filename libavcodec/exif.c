@@ -1,6 +1,7 @@
 /*
  * EXIF metadata parser
  * Copyright (c) 2013 Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * Copyright (c) 2024 Leo Izen <leo.izen@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -23,9 +24,12 @@
  * @file
  * EXIF metadata parser
  * @author Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * @author Leo Izen <leo.izen@gmail.com>
  */
 
-#include "exif.h"
+#include "libavutil/display.h"
+
+#include "exif_internal.h"
 #include "tiff_common.h"
 
 #define EXIF_TAG_NAME_LENGTH   32
@@ -197,6 +201,8 @@ static int exif_add_metadata(void *logctx, int count, int type,
     };
 }
 
+static int exif_parse_ifd_list(void *logctx, GetByteContext *gb, int le,
+                               int depth, AVDictionary **metadata);
 
 static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
                            int depth, AVDictionary **metadata)
@@ -220,7 +226,7 @@ static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
     // store metadata or proceed with next IFD
     ret = ff_tis_ifd(id);
     if (ret) {
-        ret = ff_exif_decode_ifd(logctx, gbytes, le, depth + 1, metadata);
+        ret = exif_parse_ifd_list(logctx, gbytes, le, depth + 1, metadata);
     } else {
         const char *name = exif_get_tag_name(id);
         char buf[7];
@@ -239,35 +245,262 @@ static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
     return ret;
 }
 
-
-int ff_exif_decode_ifd(void *logctx, GetByteContext *gbytes,
-                       int le, int depth, AVDictionary **metadata)
+static int exif_get_collect_size(void *logctx, GetByteContext *gb, int le, int depth)
 {
-    int i, ret;
-    int entries;
+    int entries, total_size = 2;
+    GetByteContext gbytes;
 
-    entries = ff_tget_short(gbytes, le);
+    if (depth > 2)
+        return 0;
 
-    if (bytestream2_get_bytes_left(gbytes) < entries * 12) {
+    gbytes = *gb;
+    entries = ff_tget_short(&gbytes, le);
+    if (bytestream2_get_bytes_left(&gbytes) < entries * 12)
         return AVERROR_INVALIDDATA;
+
+    for (int i = 0; i < entries; i++) {
+        int cur_pos;
+        unsigned id, count;
+        enum TiffTypes type;
+        ff_tread_tag(&gbytes, le, &id, &type, &count, &cur_pos);
+        if (!bytestream2_tell(&gbytes)) {
+            bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+            continue;
+        }
+        if (ff_tis_ifd(id)) {
+            int ret = exif_get_collect_size(logctx, &gbytes, le, depth + 1);
+            if (ret < 0)
+                return ret;
+            total_size += ret + 12;
+        } else {
+            int payload_size = type == TIFF_STRING ? count : count * type_sizes[type];
+            if (payload_size > 4)
+                total_size += 12 + payload_size;
+            else
+                total_size += 12;
+        }
+        bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
     }
 
-    for (i = 0; i < entries; i++) {
-        if ((ret = exif_decode_tag(logctx, gbytes, le, depth, metadata)) < 0) {
-            return ret;
+    return total_size;
+}
+
+static inline void tput16(PutByteContext *pb, const int le, const unsigned int value)
+{
+    le ? bytestream2_put_le16(pb, value) : bytestream2_put_be16(pb, value);
+}
+
+static inline void tput32(PutByteContext *pb, const int le, const unsigned int value)
+{
+    le ? bytestream2_put_le32(pb, value) : bytestream2_put_be32(pb, value);
+}
+
+static int exif_collect_ifd_list(void *logctx, GetByteContext *gb, int le, int depth, PutByteContext *pb)
+{
+    int entries, ret = 0, offset;
+    GetByteContext gbytes;
+
+    if (depth > 2)
+        return 0;
+
+    gbytes = *gb;
+    entries = ff_tget_short(&gbytes, le);
+    if (bytestream2_get_bytes_left(&gbytes) < entries * 12)
+        return AVERROR_INVALIDDATA;
+
+    tput16(pb, le, entries);
+    offset = bytestream2_tell_p(pb) + entries * 12;
+    for (int i = 0; i < entries; i++) {
+        int cur_pos;
+        unsigned id, count;
+        enum TiffTypes type;
+        ff_tread_tag(&gbytes, le, &id, &type, &count, &cur_pos);
+        if (!bytestream2_tell(&gbytes)) {
+            bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+            continue;
         }
+        if (bytestream2_get_bytes_left_p(pb) < 12)
+            return AVERROR_BUFFER_TOO_SMALL;
+        tput16(pb, le, id);
+        tput16(pb, le, type);
+        tput32(pb, le, count);
+        if (ff_tis_ifd(id)) {
+            int tell = bytestream2_tell_p(pb);
+            tput32(pb, le, offset);
+            bytestream2_seek_p(pb, offset, SEEK_SET);
+            ret = exif_collect_ifd_list(logctx, &gbytes, le, depth + 1, pb);
+            if (ret < 0)
+                return ret;
+            offset += ret;
+            bytestream2_seek_p(pb, tell + 4, SEEK_SET);
+        } else  {
+            int payload_size = type == TIFF_STRING ? count : count * type_sizes[type];
+            if (payload_size > 4) {
+                int tell = bytestream2_tell_p(pb);
+                tput32(pb, le, offset);
+                bytestream2_seek_p(pb, offset, SEEK_SET);
+                if (bytestream2_get_bytes_left(&gbytes) < payload_size)
+                    return AVERROR_INVALIDDATA;
+                bytestream2_put_buffer(pb, gbytes.buffer, payload_size);
+                offset += payload_size;
+                bytestream2_seek_p(pb, tell + 4, SEEK_SET);
+            } else {
+                bytestream2_put_ne32(pb, bytestream2_get_ne32(&gbytes));
+            }
+        }
+        bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+    }
+
+    return offset;
+}
+
+int ff_exif_collect_ifd(void *logctx, GetByteContext *gb, int le, AVBufferRef **buffer)
+{
+    AVBufferRef *ref = NULL;
+    int total_size, ret;
+    PutByteContext pb;
+    if (!buffer)
+        return 0;
+
+    total_size = exif_get_collect_size(logctx, gb, le, 0);
+    if (total_size <= 0)
+        return total_size;
+    total_size += 8;
+    ref = av_buffer_alloc(total_size);
+    if (!ref)
+        return AVERROR(ENOMEM);
+    bytestream2_init_writer(&pb, ref->data, total_size);
+    bytestream2_put_be32(&pb, le ? 0x49492a00 : 0x4d4d002a);
+    tput32(&pb, le, 8);
+
+    ret = exif_collect_ifd_list(logctx, gb, le, 0, &pb);
+    if (ret < 0)
+        av_buffer_unref(&ref);
+
+    *buffer = ref;
+    return ret;
+}
+
+static int exif_parse_ifd_list(void *logctx, GetByteContext *gb, int le,
+                               int depth, AVDictionary **metadata)
+{
+    int entries = ff_tget_short(gb, le);
+    if (bytestream2_get_bytes_left(gb) < entries * 12)
+        return AVERROR_INVALIDDATA;
+
+    for (int i = 0; i < entries; i++) {
+        int ret = exif_decode_tag(logctx, gb, le, depth, metadata);
+        if (ret < 0)
+            return ret;
     }
 
     // return next IDF offset or 0x000000000 or a value < 0 for failure
-    return ff_tget_long(gbytes, le);
+    return ff_tget_long(gb, le);
 }
 
-int avpriv_exif_decode_ifd(void *logctx, const uint8_t *buf, int size,
-                           int le, int depth, AVDictionary **metadata)
+int av_exif_parse_buffer(void *logctx, const uint8_t *buf, size_t size,
+                         AVDictionary **metadata, enum AVExifParseMode parse_mode)
 {
-    GetByteContext gb;
+    int ret, le;
+    GetByteContext gbytes;
+    if (size > INT_MAX)
+        return AVERROR(EINVAL);
+    bytestream2_init(&gbytes, buf, size);
+    if (parse_mode == AV_EXIF_PARSE_TIFF_HEADER) {
+        int ifd_offset;
+        // read TIFF header
+        ret = ff_tdecode_header(&gbytes, &le, &ifd_offset);
+        if (ret < 0) {
+            av_log(logctx, AV_LOG_ERROR, "invalid TIFF header in EXIF data\n");
+            return ret;
+        }
+        bytestream2_seek(&gbytes, ifd_offset, SEEK_SET);
+    } else {
+        le = parse_mode == AV_EXIF_ASSUME_LE;
+    }
 
-    bytestream2_init(&gb, buf, size);
+    // read 0th IFD and store the metadata
+    // (return values > 0 indicate the presence of subimage metadata)
+    ret = exif_parse_ifd_list(logctx, &gbytes, le, 0, metadata);
+    if (ret < 0) {
+        av_log(logctx, AV_LOG_ERROR, "error decoding EXIF data\n");
+        return ret;
+    }
 
-    return ff_exif_decode_ifd(logctx, &gb, le, depth, metadata);
+    return bytestream2_tell(&gbytes);
+}
+
+static int attach_displaymatrix(void *logctx, AVFrame *frame, const char *value)
+{
+    char *endptr;
+    AVFrameSideData *sd;
+    long orientation = strtol(value, &endptr, 0);
+    int32_t *matrix;
+    /* invalid string */
+    if (*endptr || endptr == value)
+        return 0;
+    /* invalid orientation */
+    if (orientation < 2 || orientation > 8)
+        return 0;
+    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX, sizeof(int32_t) * 9);
+    if (!sd) {
+        av_log(logctx, AV_LOG_ERROR, "Could not allocate frame side data\n");
+        return AVERROR(ENOMEM);
+    }
+    matrix = (int32_t *) sd->data;
+
+    switch (orientation) {
+    case 2:
+        av_display_rotation_set(matrix, 0.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 3:
+        av_display_rotation_set(matrix, 180.0);
+        break;
+    case 4:
+        av_display_rotation_set(matrix, 180.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 5:
+        av_display_rotation_set(matrix, 90.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 6:
+        av_display_rotation_set(matrix, 90.0);
+        break;
+    case 7:
+        av_display_rotation_set(matrix, -90.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 8:
+        av_display_rotation_set(matrix, -90.0);
+        break;
+    default:
+        av_assert0(0);
+    }
+
+    return 0;
+}
+
+int ff_exif_attach(void *logctx, AVFrame *frame, AVBufferRef **data)
+{
+    const AVDictionaryEntry *e = NULL;
+    int ret;
+    AVDictionary *m = NULL;
+    AVBufferRef *buffer = *data;
+    AVFrameSideData *sd = av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_EXIF, buffer);
+    if (!sd)
+        return AVERROR(ENOMEM);
+    *data = NULL;
+    ret = av_exif_parse_buffer(logctx, buffer->data, buffer->size, &m, AV_EXIF_PARSE_TIFF_HEADER);
+    if (ret < 0)
+        return ret;
+
+    if ((e = av_dict_get(m, "Orientation", e, AV_DICT_IGNORE_SUFFIX))) {
+        ret = attach_displaymatrix(logctx, frame, e->value);
+        if (ret < 0)
+            return ret;
+    }
+
+    return 0;
 }

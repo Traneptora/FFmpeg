@@ -56,6 +56,8 @@ static const AVSideDataDescriptor sd_props[] = {
     [AV_FRAME_DATA_SPHERICAL]                   = { "Spherical Mapping",                            AV_SIDE_DATA_PROP_GLOBAL },
     [AV_FRAME_DATA_ICC_PROFILE]                 = { "ICC profile",                                  AV_SIDE_DATA_PROP_GLOBAL },
     [AV_FRAME_DATA_SEI_UNREGISTERED]            = { "H.26[45] User Data Unregistered SEI message",  AV_SIDE_DATA_PROP_MULTI },
+    [AV_FRAME_DATA_EXIF]                        = { "EXIF metadata",
+    AV_SIDE_DATA_PROP_GLOBAL },
 };
 
 static void get_frame_defaults(AVFrame *frame)

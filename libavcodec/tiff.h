@@ -94,6 +94,7 @@ enum TiffTags {
     TIFF_GEO_KEY_DIRECTORY  = 0x87AF,
     TIFF_GEO_DOUBLE_PARAMS  = 0x87B0,
     TIFF_GEO_ASCII_PARAMS   = 0x87B1,
+    TIFF_EXIFTAG            = 0x8769,
 };
 
 /** abridged list of DNG tags */
