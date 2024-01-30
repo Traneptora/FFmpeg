@@ -43,6 +43,7 @@
 #include "codec_internal.h"
 #include "copy_block.h"
 #include "decode.h"
+#include "exif_internal.h"
 #include "hwaccel_internal.h"
 #include "hwconfig.h"
 #include "idctdsp.h"
@@ -2043,8 +2044,6 @@ static int mjpeg_decode_app(MJpegDecodeContext *s)
 
     /* EXIF metadata */
     if (s->start_code == APP1 && id == AV_RB32("Exif") && len >= 2) {
-        GetByteContext gbytes;
-        int ret, le, ifd_offset, bytes_read;
         const uint8_t *aligned;
 
         skip_bits(&s->gb, 16); // skip padding
@@ -2052,27 +2051,12 @@ static int mjpeg_decode_app(MJpegDecodeContext *s)
 
         // init byte wise reading
         aligned = align_get_bits(&s->gb);
-        bytestream2_init(&gbytes, aligned, len);
-
-        // read TIFF header
-        ret = ff_tdecode_header(&gbytes, &le, &ifd_offset);
-        if (ret) {
-            av_log(s->avctx, AV_LOG_ERROR, "mjpeg: invalid TIFF header in EXIF data\n");
-        } else {
-            bytestream2_seek(&gbytes, ifd_offset, SEEK_SET);
-
-            // read 0th IFD and store the metadata
-            // (return values > 0 indicate the presence of subimage metadata)
-            ret = ff_exif_decode_ifd(s->avctx, &gbytes, le, 0, &s->exif_metadata);
-            if (ret < 0) {
-                av_log(s->avctx, AV_LOG_ERROR, "mjpeg: error decoding EXIF data\n");
-            }
-        }
-
-        bytes_read = bytestream2_tell(&gbytes);
-        skip_bits(&s->gb, bytes_read << 3);
-        len -= bytes_read;
-
+        s->exif_buffer = av_buffer_alloc(len);
+        if (!s->exif_buffer)
+            return AVERROR(ENOMEM);
+        memcpy(s->exif_buffer->data, aligned, len);
+        skip_bits(&s->gb, len << 3);
+        len = 0;
         goto out;
     }
 
@@ -2384,13 +2368,12 @@ int ff_mjpeg_decode_frame_from_buf(AVCodecContext *avctx, AVFrame *frame,
     int index;
     int ret = 0;
     int is16bit;
-    AVDictionaryEntry *e = NULL;
 
     s->force_pal8 = 0;
 
     s->buf_size = buf_size;
 
-    av_dict_free(&s->exif_metadata);
+    av_buffer_unref(&s->exif_buffer);
     av_freep(&s->stereo3d);
     s->adobe_transform = -1;
 
@@ -2867,59 +2850,11 @@ the_end:
         }
     }
 
-    if (e = av_dict_get(s->exif_metadata, "Orientation", e, AV_DICT_IGNORE_SUFFIX)) {
-        char *value = e->value + strspn(e->value, " \n\t\r"), *endptr;
-        int orientation = strtol(value, &endptr, 0);
-
-        if (!*endptr) {
-            AVFrameSideData *sd = NULL;
-
-            if (orientation >= 2 && orientation <= 8) {
-                int32_t *matrix;
-
-                sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX, sizeof(int32_t) * 9);
-                if (!sd) {
-                    av_log(avctx, AV_LOG_ERROR, "Could not allocate frame side data\n");
-                    return AVERROR(ENOMEM);
-                }
-
-                matrix = (int32_t *)sd->data;
-
-                switch (orientation) {
-                case 2:
-                    av_display_rotation_set(matrix, 0.0);
-                    av_display_matrix_flip(matrix, 1, 0);
-                    break;
-                case 3:
-                    av_display_rotation_set(matrix, 180.0);
-                    break;
-                case 4:
-                    av_display_rotation_set(matrix, 180.0);
-                    av_display_matrix_flip(matrix, 1, 0);
-                    break;
-                case 5:
-                    av_display_rotation_set(matrix, 90.0);
-                    av_display_matrix_flip(matrix, 1, 0);
-                    break;
-                case 6:
-                    av_display_rotation_set(matrix, 90.0);
-                    break;
-                case 7:
-                    av_display_rotation_set(matrix, -90.0);
-                    av_display_matrix_flip(matrix, 1, 0);
-                    break;
-                case 8:
-                    av_display_rotation_set(matrix, -90.0);
-                    break;
-                default:
-                    av_assert0(0);
-                }
-            }
-        }
+    if (s->exif_buffer) {
+        ret = ff_exif_attach(s->avctx, frame, &s->exif_buffer);
+        if (ret < 0)
+            return ret;
     }
-
-    av_dict_copy(&frame->metadata, s->exif_metadata, 0);
-    av_dict_free(&s->exif_metadata);
 
     if (avctx->codec_id != AV_CODEC_ID_SMVJPEG &&
         (avctx->codec_tag == MKTAG('A', 'V', 'R', 'n') ||
@@ -2975,7 +2910,7 @@ av_cold int ff_mjpeg_decode_end(AVCodecContext *avctx)
         av_freep(&s->blocks[i]);
         av_freep(&s->last_nnz[i]);
     }
-    av_dict_free(&s->exif_metadata);
+    av_buffer_unref(&s->exif_buffer);
 
     reset_icc_profile(s);
 

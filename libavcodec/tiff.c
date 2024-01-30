@@ -46,6 +46,7 @@
 #include "bytestream.h"
 #include "codec_internal.h"
 #include "decode.h"
+#include "exif_internal.h"
 #include "faxcompr.h"
 #include "lzw.h"
 #include "tiff.h"
@@ -1268,7 +1269,7 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
         s->last_tag = tag;
 
     off = bytestream2_tell(&s->gb);
-    if (count == 1) {
+    if (count == 1 && tag != TIFF_EXIFTAG) {
         switch (type) {
         case TIFF_BYTE:
         case TIFF_SHORT:
@@ -1770,6 +1771,22 @@ static int tiff_decode_tag(TiffContext *s, AVFrame *frame)
     case TIFF_SOFTWARE_NAME:
         ADD_METADATA(count, "software", NULL);
         break;
+    case TIFF_EXIFTAG: {
+        AVBufferRef *exif = NULL;
+        int next;
+        gb_temp = s->gb;
+        next = ff_exif_collect_ifd(s->avctx, &gb_temp, s->le, &exif);
+        if (next < 0)
+            av_log(s->avctx, AV_LOG_ERROR, "Error parsing TIFF exif tags: %d\n", next);
+        else if (next)
+            bytestream2_seek(&s->gb, next, SEEK_SET);
+        if (exif) {
+            ret = ff_exif_attach(s->avctx, frame, &exif);
+            if (ret < 0)
+                return ret;
+        }
+        break;
+    }
     case DNG_VERSION:
         if (count == 4) {
             unsigned int ver[4];

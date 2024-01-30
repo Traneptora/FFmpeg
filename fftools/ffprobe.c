@@ -32,6 +32,7 @@
 #include "libavformat/avformat.h"
 #include "libavformat/version.h"
 #include "libavcodec/avcodec.h"
+#include "libavcodec/exif.h"
 #include "libavcodec/version.h"
 #include "libavutil/ambient_viewing_environment.h"
 #include "libavutil/avassert.h"
@@ -2031,19 +2032,30 @@ static void writer_register_all(void)
     memset( (ptr) + (cur_n), 0, ((new_n) - (cur_n)) * sizeof(*(ptr)) ); \
 }
 
-static inline int show_tags(WriterContext *w, AVDictionary *tags, int section_id)
+static inline int show_dict(WriterContext *w, const AVDictionary *tags)
 {
     const AVDictionaryEntry *tag = NULL;
     int ret = 0;
+    if (!tags)
+        return 0;
+    while ((tag = av_dict_iterate(tags, tag))) {
+        ret = print_str_validate(tag->key, tag->value);
+        if (ret < 0)
+            break;
+    }
+    return ret;
+}
+
+static inline int show_tags(WriterContext *w, const AVDictionary *tags, int section_id)
+{
+    int ret;
 
     if (!tags)
         return 0;
     writer_print_section_header(w, NULL, section_id);
 
-    while ((tag = av_dict_iterate(tags, tag))) {
-        if ((ret = print_str_validate(tag->key, tag->value)) < 0)
-            break;
-    }
+    ret = show_dict(w, tags);
+
     writer_print_section_footer(w);
 
     return ret;
@@ -2913,6 +2925,11 @@ static void print_frame_side_data(WriterContext *w,
             print_film_grain_params(w, fgp);
         } else if (sd->type == AV_FRAME_DATA_VIEW_ID) {
             print_int("view_id", *(int*)sd->data);
+        } else if (sd->type == AV_FRAME_DATA_EXIF) {
+            AVDictionary *dict = NULL;
+            int ret = av_exif_parse_buffer(NULL, sd->data, sd->size, &dict, AV_EXIF_PARSE_TIFF_HEADER);
+            if (ret >= 0)
+                show_dict(w, dict);
         }
         writer_print_section_footer(w);
     }

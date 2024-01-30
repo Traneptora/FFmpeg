@@ -1,6 +1,7 @@
 /*
  * EXIF metadata parser
  * Copyright (c) 2013 Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * Copyright (c) 2024 Leo Izen <leo.izen@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -23,12 +24,16 @@
  * @file
  * EXIF metadata parser
  * @author Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * @author Leo Izen <leo.izen@gmail.com>
  */
 
-#include "exif.h"
+#include "libavutil/display.h"
+
+#include "exif_internal.h"
 #include "tiff_common.h"
 
 #define EXIF_TAG_NAME_LENGTH   32
+#define MAKERNOTE_TAG 0x927c
 
 struct exif_tag {
     char      name[EXIF_TAG_NAME_LENGTH];
@@ -175,11 +180,6 @@ static int exif_add_metadata(void *logctx, int count, int type,
                              AVDictionary **metadata)
 {
     switch(type) {
-    case 0:
-        av_log(logctx, AV_LOG_WARNING,
-               "Invalid TIFF tag type 0 found for %s with size %d\n",
-               name, count);
-        return 0;
     case TIFF_DOUBLE   : return ff_tadd_doubles_metadata(count, name, sep, gb, le, metadata);
     case TIFF_SSHORT   : return ff_tadd_shorts_metadata(count, name, sep, gb, le, 1, metadata);
     case TIFF_SHORT    : return ff_tadd_shorts_metadata(count, name, sep, gb, le, 0, metadata);
@@ -192,11 +192,14 @@ static int exif_add_metadata(void *logctx, int count, int type,
     case TIFF_SLONG    :
     case TIFF_LONG     : return ff_tadd_long_metadata(count, name, sep, gb, le, metadata);
     default:
-        avpriv_request_sample(logctx, "TIFF tag type (%u)", type);
+        av_log(logctx, AV_LOG_WARNING,
+            "Invalid TIFF tag type %d found for %s with size %d\n", type, name, count);
         return 0;
     };
 }
 
+static int exif_parse_ifd_list(void *logctx, GetByteContext *gb, int le,
+                               int depth, AVDictionary **metadata);
 
 static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
                            int depth, AVDictionary **metadata)
@@ -220,7 +223,7 @@ static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
     // store metadata or proceed with next IFD
     ret = ff_tis_ifd(id);
     if (ret) {
-        ret = ff_exif_decode_ifd(logctx, gbytes, le, depth + 1, metadata);
+        ret = exif_parse_ifd_list(logctx, gbytes, le, depth + 1, metadata);
     } else {
         const char *name = exif_get_tag_name(id);
         char buf[7];
@@ -239,35 +242,342 @@ static int exif_decode_tag(void *logctx, GetByteContext *gbytes, int le,
     return ret;
 }
 
+static const uint8_t casio_header[] = {
+    'Q', 'V', 'C', 0, 0, 0,
+};
 
-int ff_exif_decode_ifd(void *logctx, GetByteContext *gbytes,
-                       int le, int depth, AVDictionary **metadata)
-{
-    int i, ret;
-    int entries;
+static const uint8_t fuji_header[] = {
+    'F', 'U', 'J', 'I',
+};
 
-    entries = ff_tget_short(gbytes, le);
+static const uint8_t nikon_header[] = {
+    'N', 'i', 'k', 'o', 'n', 0,
+};
 
-    if (bytestream2_get_bytes_left(gbytes) < entries * 12) {
-        return AVERROR_INVALIDDATA;
+static const uint8_t olympus1_header[] = {
+    'O', 'L', 'Y', 'M', 'P', 0,
+};
+
+static const uint8_t olympus2_header[] = {
+    'O', 'L', 'Y', 'M', 'P', 'U', 'S', 0, 'I', 'I',
+};
+
+static const uint8_t panosonic_header[] = {
+    'P', 'a', 'n', 'o', 's', 'o', 'n',  'i', 'c', 0, 0, 0,
+};
+
+static const uint8_t aoc_header[] = {
+    'A', 'O', 'C', 0,
+};
+
+static const uint8_t sigma_header[] = {
+    'S', 'I', 'G', 'M', 'A', 0, 0, 0,
+};
+
+static const uint8_t foveon_header[] = {
+    'F', 'O', 'V', 'E', 'O', 'N', 0, 0,
+};
+
+static const uint8_t sony_header[] = {
+    'S', 'O', 'N', 'Y', ' ', 'D', 'S', 'C', ' ', 0, 0, 0,
+};
+
+
+static int exif_get_makernote_offset(GetByteContext *gb) {
+    if (!memcmp(gb->buffer, casio_header, sizeof(casio_header))) {
+        return -1;
+    } else if (!memcmp(gb->buffer, fuji_header, sizeof(fuji_header))) {
+        return -1;
+    } else if (!memcmp(gb->buffer, olympus2_header, sizeof(olympus2_header))) {
+        return -1;
+    } else if (!memcmp(gb->buffer, olympus1_header, sizeof(olympus1_header)))  {
+        return 8;
+    } else if (!memcmp(gb->buffer, nikon_header, sizeof(nikon_header))) {
+        if (bytestream2_get_bytes_left(gb) < 14)
+            return -1;
+        else if (AV_RB32(gb->buffer + 10) == 0x49492a00 || AV_RB32(gb->buffer + 10) == 0x4d4d002a)
+            return -1;
+        return 8;
+    } else if (!memcmp(gb->buffer, panosonic_header, sizeof(panosonic_header))) {
+        return 12;
+    } else if (!memcmp(gb->buffer, aoc_header, sizeof(aoc_header))) {
+        return 6;
+    } else if (!memcmp(gb->buffer, sigma_header, sizeof(sigma_header))) {
+        return 10;
+    } else if (!memcmp(gb->buffer, foveon_header, sizeof(foveon_header))) {
+        return 10;
+    } else if (!memcmp(gb->buffer, sony_header, sizeof(sony_header))) {
+        return 12;
     }
 
-    for (i = 0; i < entries; i++) {
-        if ((ret = exif_decode_tag(logctx, gbytes, le, depth, metadata)) < 0) {
-            return ret;
+    return 0;
+}
+
+static int exif_get_collect_size(void *logctx, GetByteContext *gb, int le, int depth)
+{
+    int entries, total_size = 2;
+    GetByteContext gbytes;
+
+    if (depth > 2)
+        return 0;
+
+    gbytes = *gb;
+    entries = ff_tget_short(&gbytes, le);
+    if (bytestream2_get_bytes_left(&gbytes) < entries * 12)
+        return AVERROR_INVALIDDATA;
+
+    for (int i = 0; i < entries; i++) {
+        int cur_pos, makernote_ifd = -1;
+        unsigned id, count;
+        enum TiffTypes type;
+        ff_tread_tag(&gbytes, le, &id, &type, &count, &cur_pos);
+        if (!bytestream2_tell(&gbytes)) {
+            bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+            continue;
         }
+        if (id == MAKERNOTE_TAG)
+            makernote_ifd = exif_get_makernote_offset(&gbytes);
+        if (id != MAKERNOTE_TAG && ff_tis_ifd(id) || makernote_ifd >= 0) {
+            int makernote_off = makernote_ifd >= 0 ? makernote_ifd : 0;
+            bytestream2_seek(&gbytes, makernote_off, SEEK_CUR);
+            int ret = exif_get_collect_size(logctx, &gbytes, le, depth + 1);
+            if (ret < 0)
+                return ret;
+            total_size += ret + 12 + makernote_off;
+        } else {
+            int payload_size = type == TIFF_STRING ? count : count * type_sizes[type];
+            if (payload_size > 4)
+                total_size += 12 + payload_size;
+            else
+                total_size += 12;
+        }
+        bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+    }
+
+    return total_size;
+}
+
+static inline void tput16(PutByteContext *pb, const int le, const uint16_t value)
+{
+    le ? bytestream2_put_le16(pb, value) : bytestream2_put_be16(pb, value);
+}
+
+static inline void tput32(PutByteContext *pb, const int le, const uint32_t value)
+{
+    le ? bytestream2_put_le32(pb, value) : bytestream2_put_be32(pb, value);
+}
+
+static int exif_collect_ifd_list(void *logctx, GetByteContext *gb, int le, int depth, PutByteContext *pb)
+{
+    int entries, ret = 0, offset;
+    GetByteContext gbytes;
+
+    if (depth > 2)
+        return 0;
+
+    gbytes = *gb;
+    entries = ff_tget_short(&gbytes, le);
+    if (bytestream2_get_bytes_left(&gbytes) < entries * 12)
+        return AVERROR_INVALIDDATA;
+
+    tput16(pb, le, entries);
+    offset = bytestream2_tell_p(pb) + entries * 12;
+    for (int i = 0; i < entries; i++) {
+        int cur_pos, makernote_ifd = -1;
+        unsigned id, count;
+        enum TiffTypes type;
+        ff_tread_tag(&gbytes, le, &id, &type, &count, &cur_pos);
+        if (!bytestream2_tell(&gbytes)) {
+            bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+            continue;
+        }
+        if (bytestream2_get_bytes_left_p(pb) < 12)
+            return AVERROR_BUFFER_TOO_SMALL;
+        tput16(pb, le, id);
+        tput16(pb, le, type);
+        tput32(pb, le, count);
+        if (id == MAKERNOTE_TAG)
+            makernote_ifd = exif_get_makernote_offset(&gbytes);
+        if (id != MAKERNOTE_TAG && ff_tis_ifd(id) || makernote_ifd >= 0) {
+            int tell = bytestream2_tell_p(pb);
+            int makernote_off = makernote_ifd >= 0 ? makernote_ifd : 0;
+            tput32(pb, le, offset);
+            bytestream2_seek_p(pb, offset, SEEK_SET);
+            if (makernote_off)
+                bytestream2_copy_buffer(pb, &gbytes, makernote_off);
+            ret = exif_collect_ifd_list(logctx, &gbytes, le, depth + 1, pb);
+            if (ret < 0)
+                return ret;
+            offset += ret + makernote_off;
+            bytestream2_seek_p(pb, tell + 4, SEEK_SET);
+        } else  {
+            int payload_size = type == TIFF_STRING ? count : count * type_sizes[type];
+            if (payload_size > 4) {
+                int tell = bytestream2_tell_p(pb);
+                tput32(pb, le, offset);
+                bytestream2_seek_p(pb, offset, SEEK_SET);
+                if (bytestream2_get_bytes_left(&gbytes) < payload_size)
+                    return AVERROR_INVALIDDATA;
+                bytestream2_put_buffer(pb, gbytes.buffer, payload_size);
+                offset += payload_size;
+                bytestream2_seek_p(pb, tell + 4, SEEK_SET);
+            } else {
+                bytestream2_put_ne32(pb, bytestream2_get_ne32(&gbytes));
+            }
+        }
+        bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
+    }
+
+    return offset;
+}
+
+int ff_exif_collect_ifd(void *logctx, GetByteContext *gb, int le, AVBufferRef **buffer)
+{
+    AVBufferRef *ref = NULL;
+    int total_size, ret;
+    PutByteContext pb;
+    if (!buffer)
+        return 0;
+
+    total_size = exif_get_collect_size(logctx, gb, le, 0);
+    if (total_size <= 0)
+        return total_size;
+    total_size += 8;
+    ref = av_buffer_alloc(total_size);
+    if (!ref)
+        return AVERROR(ENOMEM);
+    bytestream2_init_writer(&pb, ref->data, total_size);
+    bytestream2_put_be32(&pb, le ? 0x49492a00 : 0x4d4d002a);
+    tput32(&pb, le, 8);
+
+    ret = exif_collect_ifd_list(logctx, gb, le, 0, &pb);
+    if (ret < 0)
+        av_buffer_unref(&ref);
+
+    *buffer = ref;
+    return ret;
+}
+
+static int exif_parse_ifd_list(void *logctx, GetByteContext *gb, int le,
+                               int depth, AVDictionary **metadata)
+{
+    int entries = ff_tget_short(gb, le);
+    if (bytestream2_get_bytes_left(gb) < entries * 12)
+        return AVERROR_INVALIDDATA;
+
+    for (int i = 0; i < entries; i++) {
+        int ret = exif_decode_tag(logctx, gb, le, depth, metadata);
+        if (ret < 0)
+            return ret;
     }
 
     // return next IDF offset or 0x000000000 or a value < 0 for failure
-    return ff_tget_long(gbytes, le);
+    return ff_tget_long(gb, le);
 }
 
-int avpriv_exif_decode_ifd(void *logctx, const uint8_t *buf, int size,
-                           int le, int depth, AVDictionary **metadata)
+int av_exif_parse_buffer(void *logctx, const uint8_t *buf, size_t size,
+                         AVDictionary **metadata, enum AVExifParseMode parse_mode)
 {
-    GetByteContext gb;
+    int ret, le;
+    GetByteContext gbytes;
+    if (size > INT_MAX)
+        return AVERROR(EINVAL);
+    bytestream2_init(&gbytes, buf, size);
+    if (parse_mode == AV_EXIF_PARSE_TIFF_HEADER) {
+        int ifd_offset;
+        // read TIFF header
+        ret = ff_tdecode_header(&gbytes, &le, &ifd_offset);
+        if (ret < 0) {
+            av_log(logctx, AV_LOG_ERROR, "invalid TIFF header in EXIF data\n");
+            return ret;
+        }
+        bytestream2_seek(&gbytes, ifd_offset, SEEK_SET);
+    } else {
+        le = parse_mode == AV_EXIF_ASSUME_LE;
+    }
 
-    bytestream2_init(&gb, buf, size);
+    // read 0th IFD and store the metadata
+    // (return values > 0 indicate the presence of subimage metadata)
+    ret = exif_parse_ifd_list(logctx, &gbytes, le, 0, metadata);
+    if (ret < 0) {
+        av_log(logctx, AV_LOG_ERROR, "error decoding EXIF data\n");
+        return ret;
+    }
 
-    return ff_exif_decode_ifd(logctx, &gb, le, depth, metadata);
+    return bytestream2_tell(&gbytes);
+}
+
+static int attach_displaymatrix(void *logctx, AVFrame *frame, const char *value)
+{
+    char *endptr;
+    AVFrameSideData *sd;
+    long orientation = strtol(value, &endptr, 0);
+    int32_t *matrix;
+    /* invalid string */
+    if (*endptr || endptr == value)
+        return 0;
+    /* invalid orientation */
+    if (orientation < 2 || orientation > 8)
+        return 0;
+    sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX, sizeof(int32_t) * 9);
+    if (!sd) {
+        av_log(logctx, AV_LOG_ERROR, "Could not allocate frame side data\n");
+        return AVERROR(ENOMEM);
+    }
+    matrix = (int32_t *) sd->data;
+
+    switch (orientation) {
+    case 2:
+        av_display_rotation_set(matrix, 0.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 3:
+        av_display_rotation_set(matrix, 180.0);
+        break;
+    case 4:
+        av_display_rotation_set(matrix, 180.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 5:
+        av_display_rotation_set(matrix, 90.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 6:
+        av_display_rotation_set(matrix, 90.0);
+        break;
+    case 7:
+        av_display_rotation_set(matrix, -90.0);
+        av_display_matrix_flip(matrix, 1, 0);
+        break;
+    case 8:
+        av_display_rotation_set(matrix, -90.0);
+        break;
+    default:
+        av_assert0(0);
+    }
+
+    return 0;
+}
+
+int ff_exif_attach(void *logctx, AVFrame *frame, AVBufferRef **data)
+{
+    const AVDictionaryEntry *e = NULL;
+    int ret;
+    AVDictionary *m = NULL;
+    AVBufferRef *buffer = *data;
+    AVFrameSideData *sd = av_frame_new_side_data_from_buf(frame, AV_FRAME_DATA_EXIF, buffer);
+    if (!sd)
+        return AVERROR(ENOMEM);
+    *data = NULL;
+    ret = av_exif_parse_buffer(logctx, buffer->data, buffer->size, &m, AV_EXIF_PARSE_TIFF_HEADER);
+    if (ret < 0)
+        return ret;
+
+    if ((e = av_dict_get(m, "Orientation", e, AV_DICT_IGNORE_SUFFIX))) {
+        ret = attach_displaymatrix(logctx, frame, e->value);
+        if (ret < 0)
+            return ret;
+    }
+
+    return 0;
 }
