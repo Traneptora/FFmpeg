@@ -1,5 +1,5 @@
 /*
- * EXIF metadata parser
+ * EXIF metadata parser - internal functions
  * Copyright (c) 2013 Thilo Borgmann <thilo.borgmann _at_ mail.de>
  * Copyright (c) 2024 Leo Izen <leo.izen@gmail.com>
  *
@@ -22,29 +22,20 @@
 
 /**
  * @file
- * EXIF metadata parser
+ * EXIF metadata parser - internal functions
  * @author Thilo Borgmann <thilo.borgmann _at_ mail.de>
  * @author Leo Izen <leo.izen@gmail.com>
  */
 
-#ifndef AVCODEC_EXIF_H
-#define AVCODEC_EXIF_H
+#ifndef AVCODEC_EXIF_INTERNAL_H
+#define AVCODEC_EXIF_INTERNAL_H
 
-#include <stdint.h>
+#include "libavutil/buffer.h"
+#include "libavutil/frame.h"
+#include "bytestream.h"
+#include "exif.h"
 
-#include "libavutil/dict.h"
+int ff_exif_attach(void *logctx, AVFrame *frame, AVBufferRef **data);
+int ff_exif_collect_ifd(void *logctx, GetByteContext *gb, int le, AVBufferRef **buffer);
 
-enum AVExifParseMode {
-    AV_EXIF_PARSE_TIFF_HEADER,
-    AV_EXIF_ASSUME_LE,
-    AV_EXIF_ASSUME_BE,
-};
-
-/**
- * Recursively decodes all IFD's and
- * adds included TAGS into the metadata dictionary.
- */
-int av_exif_parse_buffer(void *logctx, const uint8_t *data, size_t size,
-                         AVDictionary **metadata, enum AVExifParseMode parse_mode);
-
-#endif /* AVCODEC_EXIF_H */
+#endif /* AVCODEC_EXIF_INTERNAL_H */
