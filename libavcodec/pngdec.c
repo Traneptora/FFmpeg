@@ -39,6 +39,7 @@
 #include "bytestream.h"
 #include "codec_internal.h"
 #include "decode.h"
+#include "exif_internal.h"
 #include "apng.h"
 #include "png.h"
 #include "pngdsp.h"
@@ -125,6 +126,7 @@ typedef struct PNGDecContext {
     int pass_row_size; /* decompress row size of the current pass */
     int y;
     FFZStream zstream;
+    AVBufferRef *exif_data;
 } PNGDecContext;
 
 /* Mask to determine which pixels are valid in a pass */
@@ -654,6 +656,26 @@ static int decode_phys_chunk(AVCodecContext *avctx, PNGDecContext *s,
     return 0;
 }
 
+static int decode_exif_chunk(AVCodecContext *avctx, PNGDecContext *s,
+                             GetByteContext *gb)
+{
+    if (!(s->hdr_state & PNG_IHDR)) {
+        av_log(avctx, AV_LOG_ERROR, "eXIf before IHDR\n");
+        return AVERROR_INVALIDDATA;
+    }
+    if (s->pic_state & PNG_IDAT) {
+        av_log(avctx, AV_LOG_ERROR, "eXIf after IDAT\n");
+        return AVERROR_INVALIDDATA;
+    }
+    av_buffer_unref(&s->exif_data);
+    s->exif_data = av_buffer_alloc(bytestream2_get_bytes_left(gb));
+    if (!s->exif_data)
+        return AVERROR(ENOMEM);
+    bytestream2_get_buffer(gb, s->exif_data->data, s->exif_data->size);
+
+    return 0;
+}
+
 /*
  * This populates AVCodecContext fields so it must be called before
  * ff_thread_finish_setup() to avoid a race condition with respect to the
@@ -905,6 +927,12 @@ static int decode_idat_chunk(AVCodecContext *avctx, PNGDecContext *s,
         p->pict_type        = AV_PICTURE_TYPE_I;
         p->flags           |= AV_FRAME_FLAG_KEY;
         p->flags |= AV_FRAME_FLAG_INTERLACED * !!s->interlace_type;
+
+        if (s->exif_data) {
+            ret = ff_exif_attach(avctx, p, &s->exif_data);
+            if (ret < 0)
+                return ret;
+        }
 
         if ((ret = populate_avctx_color_fields(avctx, p)) < 0)
             return ret;
@@ -1594,6 +1622,12 @@ static int decode_frame_common(AVCodecContext *avctx, PNGDecContext *s,
             s->mdcv_max_lum = bytestream2_get_be32u(&gb_chunk);
             s->mdcv_min_lum = bytestream2_get_be32u(&gb_chunk);
             break;
+        case MKTAG('e', 'X', 'I', 'f'): {
+            ret = decode_exif_chunk(avctx, s, &gb_chunk);
+            if (ret < 0)
+                goto fail;
+            break;
+        }
         case MKTAG('I', 'E', 'N', 'D'):
             if (!(s->pic_state & PNG_ALLIMAGE))
                 av_log(avctx, AV_LOG_ERROR, "IEND without all image\n");
@@ -1914,6 +1948,7 @@ static av_cold int png_dec_end(AVCodecContext *avctx)
     s->tmp_row_size = 0;
 
     av_freep(&s->iccp_data);
+    av_buffer_unref(&s->exif_data);
     av_dict_free(&s->frame_metadata);
     ff_inflate_end(&s->zstream);
 
