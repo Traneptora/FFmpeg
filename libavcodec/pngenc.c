@@ -414,6 +414,10 @@ static int encode_headers(AVCodecContext *avctx, const AVFrame *pict)
         }
     }
 
+    side_data = av_frame_get_side_data(pict, AV_FRAME_DATA_EXIF);
+    if (side_data)
+        png_write_chunk(&s->bytestream, MKTAG('e', 'X', 'I', 'f'), side_data->data, FFMIN(side_data->size, INT_MAX));
+
     side_data = av_frame_get_side_data(pict, AV_FRAME_DATA_ICC_PROFILE);
     if ((ret = png_write_iccp(s, side_data)))
         return ret;
