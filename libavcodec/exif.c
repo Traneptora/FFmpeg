@@ -267,7 +267,9 @@ static int exif_get_collect_size(void *logctx, GetByteContext *gb, int le, int d
             bytestream2_seek(&gbytes, cur_pos, SEEK_SET);
             continue;
         }
-        if (ff_tis_ifd(id)) {
+        if (id == 0x927c) {
+
+        } else if (ff_tis_ifd(id)) {
             int ret = exif_get_collect_size(logctx, &gbytes, le, depth + 1);
             if (ret < 0)
                 return ret;
@@ -285,15 +287,55 @@ static int exif_get_collect_size(void *logctx, GetByteContext *gb, int le, int d
     return total_size;
 }
 
-static inline void tput16(PutByteContext *pb, const int le, const unsigned int value)
+static inline void tput16(PutByteContext *pb, const int le, const uint16_t value)
 {
     le ? bytestream2_put_le16(pb, value) : bytestream2_put_be16(pb, value);
 }
 
-static inline void tput32(PutByteContext *pb, const int le, const unsigned int value)
+static inline void tput32(PutByteContext *pb, const int le, const uint32_t value)
 {
     le ? bytestream2_put_le32(pb, value) : bytestream2_put_be32(pb, value);
 }
+
+static const uint8_t casio_header[] = {
+    'Q', 'V', 'C', 0, 0, 0,
+};
+
+static const uint8_t fuji_header[] = {
+    'F', 'U', 'J', 'I',
+};
+
+static const uint8_t nikon_header[] = {
+    'N', 'i', 'k', 'o', 'n', 0,
+};
+
+static const uint8_t olympus1_header[] = {
+    'O', 'L', 'Y', 'M', 'P', 0,
+};
+
+static const uint8_t olympus2_header[] = {
+    'O', 'L', 'Y', 'M', 'P', 'U', 'S', 0, 'I', 'I',
+};
+
+static const uint8_t panosonic_header[] = {
+    'P', 'a', 'n', 'o', 's', 'o', 'n',  'i', 'c', 0, 0, 0,
+};
+
+static const uint8_t aoc_header[] = {
+    'A', 'O', 'C', 0,
+};
+
+static const uint8_t sigma_header[] = {
+    'S', 'I', 'G', 'M', 'A', 0, 0, 0,
+};
+
+static const uint8_t foveon_header[] = {
+    'F', 'O', 'V', 'E', 'O', 'N', 0, 0,
+};
+
+static const uint8_t sony_header[] = {
+    'S', 'O', 'N', 'Y', ' ', 'D', 'S', 'C', ' ', 0, 0, 0,
+};
 
 static int exif_collect_ifd_list(void *logctx, GetByteContext *gb, int le, int depth, PutByteContext *pb)
 {
@@ -311,7 +353,7 @@ static int exif_collect_ifd_list(void *logctx, GetByteContext *gb, int le, int d
     tput16(pb, le, entries);
     offset = bytestream2_tell_p(pb) + entries * 12;
     for (int i = 0; i < entries; i++) {
-        int cur_pos;
+        int cur_pos, makernote_ifd = -1;
         unsigned id, count;
         enum TiffTypes type;
         ff_tread_tag(&gbytes, le, &id, &type, &count, &cur_pos);
@@ -324,10 +366,40 @@ static int exif_collect_ifd_list(void *logctx, GetByteContext *gb, int le, int d
         tput16(pb, le, id);
         tput16(pb, le, type);
         tput32(pb, le, count);
-        if (ff_tis_ifd(id)) {
+        if (id == 0x927c) {
+            if (!memcmp(gbytes.buffer, casio_header, sizeof(casio_header))) {
+                makernote_ifd = -1;
+            } else if (!memcmp(gbytes.buffer, fuji_header, sizeof(fuji_header))) {
+                makernote_ifd = -1;
+            } else if (!memcmp(gbytes.buffer, olympus2_header, sizeof(olympus2_header))) {
+                makernote_ifd = -1;
+            } else if (!memcmp(gbytes.buffer, olympus1_header, sizeof(olympus1_header)))  {
+                makernote_ifd = 8;
+            } else if (!memcmp(gbytes.buffer, nikon_header, sizeof(nikon_header))) {
+                if (bytestream2_get_bytes_left(&gbytes) < 14)
+                    makernote_ifd = -1;
+                else if (AV_RB32(gbytes.buffer + 10) == 0x49492a00 || AV_RB32(gbytes.buffer + 10) == 0x4d4d002a)
+                    makernote_ifd = -1;
+                else
+                    makernote_ifd = 8;
+            } else if (!memcmp(gbytes.buffer, panosonic_header, sizeof(panosonic_header))) {
+                makernote_ifd = 12;
+            } else if (!memcmp(gbytes.buffer, aoc_header, sizeof(aoc_header))) {
+                makernote_ifd = 6;
+            } else if (!memcmp(gbytes.buffer, sigma_header, sizeof(sigma_header))) {
+                makernote_ifd = 10;
+            } else if (!memcmp(gbytes.buffer, foveon_header, sizeof(foveon_header))) {
+                makernote_ifd = 10;
+            } else if (!memcmp(gbytes.buffer, sony_header, sizeof(sony_header))) {
+                makernote_ifd = 12;
+            } else {
+                makernote_ifd = 0;
+            }
+        }
+        if (ff_tis_ifd(id) || makernote_ifd >= 0) {
             int tell = bytestream2_tell_p(pb);
             tput32(pb, le, offset);
-            bytestream2_seek_p(pb, offset, SEEK_SET);
+            bytestream2_seek_p(pb, offset + (makernote_ifd >= 0 ? makernote_ifd : 0), SEEK_SET);
             ret = exif_collect_ifd_list(logctx, &gbytes, le, depth + 1, pb);
             if (ret < 0)
                 return ret;
