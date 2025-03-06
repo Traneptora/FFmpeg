@@ -1,6 +1,7 @@
 /*
  * EXIF metadata parser
  * Copyright (c) 2013 Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * Copyright (c) 2024-2025 Leo Izen <leo.izen@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -23,14 +24,18 @@
  * @file
  * EXIF metadata parser
  * @author Thilo Borgmann <thilo.borgmann _at_ mail.de>
+ * @author Leo Izen <leo.izen@gmail.com>
  */
 
 #ifndef AVCODEC_EXIF_H
 #define AVCODEC_EXIF_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+#include "libavutil/buffer.h"
 #include "libavutil/dict.h"
-#include "bytestream.h"
+#include "libavutil/rational.h"
 
 /** Data type identifiers for TIFF tags */
 enum AVTiffDataType {
@@ -49,12 +54,84 @@ enum AVTiffDataType {
     AV_TIFF_IFD,
 };
 
-/** Recursively decodes all IFD's and
- *  adds included TAGS into the metadata dictionary. */
+enum AVExifParseMode {
+    AV_EXIF_PARSE_TIFF_HEADER,
+    AV_EXIF_ASSUME_LE,
+    AV_EXIF_ASSUME_BE,
+};
+
+typedef struct AVExifEntry AVExifEntry;
+
+typedef struct AVExifMetadata {
+    AVExifEntry *entries;
+    uint16_t count;
+} AVExifMetadata;
+
+struct AVExifEntry {
+    uint16_t id;
+    enum AVTiffDataType type;
+    uint32_t count;
+
+    /*
+     * These are for IFD-style MakerNote
+     * entries which occur after a fixed
+     * offset rather than at the start of
+     * the entry. The ifd_lead field contains
+     * the leading bytes which typically
+     * identify the type of MakerNote.
+     */
+    uint32_t ifd_offset;
+    uint8_t *ifd_lead;
+
+    /*
+     * An array of entries of size count
+     * Unless it's an IFD, in which case
+     * it's not an array and count = 1
+     */
+    union {
+        void *ptr;
+        int64_t *sint;
+        uint64_t *uint;
+        double *dbl;
+        char *str;
+        uint8_t *ubytes;
+        int8_t *sbytes;
+        AVRational *rat;
+        AVExifMetadata ifd;
+    } value;
+};
+
+/**
+ * Decodes the EXIF data provided in the buffer and writes it into the
+ * struct *ifd. If this function succeeds, the IFD is owned by the caller
+ * and must be cleared after use by calling av_exif_free(); If this function
+ * fails and returns a negative value, it will call av_exif_free(ifd) before
+ * returning.
+ */
+int av_exif_parse_buffer(void *logctx, const uint8_t *data, size_t size,
+                         AVExifMetadata *ifd, enum AVExifParseMode parse_mode);
+
+/**
+ * Allocates a buffer using av_malloc of an appropriate size and writes the
+ * EXIF data represented by ifd into that buffer. Upon error, *buffer will
+ * be NULL. The buffer becomes owned by the caller upon success. The *buffer
+ * argument must be NULL before calling.
+ */
+int av_exif_write(void *logctx, const AVExifMetadata *ifd, AVBufferRef **buffer);
+
+/**
+ * Frees all resources associated with the given EXIF metadata struct.
+ */
+void av_exif_free(AVExifMetadata *ifd);
+
+/**
+ * Recursively reads all tags from the IFD and stores them in the
+ * provided metadata dictionary.
+ */
+int av_exif_ifd_to_dict(void *logctx, const AVExifMetadata *ifd, AVDictionary **metadata);
+
+/* Used by the AVI demuxer */
 int avpriv_exif_decode_ifd(void *logctx, const uint8_t *buf, int size,
                            int le, int depth, AVDictionary **metadata);
-
-int ff_exif_decode_ifd(void *logctx, GetByteContext *gbytes, int le,
-                       int depth, AVDictionary **metadata);
 
 #endif /* AVCODEC_EXIF_H */
