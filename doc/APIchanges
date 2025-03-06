@@ -2,6 +2,15 @@ The last version increases of all libraries were on 2024-03-07
 
 API changes, most recent first:
 
+2025-03-18 - xxxxxxxxxx - lavc 61.34.100 - exif.h
+  - add enum AVExifParseMode and enum AVTiffDataType
+  - add struct AVExifEntry and struct AVExifMetadata
+  - add the following public functions:
+    - av_exif_parse_buffer, av_exif_write, av_exif_free,
+    - av_exif_ifd_to_dict, av_exif_clone_ifd,
+    - av_exif_get_tag_name, av_exif_get_tag_id,
+    - av_exif_set_entry,
+
 2025-03-17 - xxxxxxxxxx - lavu 59.60.100 - pixfmt.h
   Add AV_PIX_FMT_GBRAP32BE and AV_PIX_FMT_GBRAP32LE.
 
