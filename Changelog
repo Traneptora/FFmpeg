@@ -26,6 +26,7 @@ version <next>:
 - OpenHarmony hardware decoder/encoder
 - Colordetect filter
 
+- EXIF Metadata Parsing
 
 version 7.1:
 - Raw Captions with Time (RCWT) closed caption demuxer
