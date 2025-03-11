@@ -36,6 +36,7 @@
 #include "libavutil/buffer.h"
 #include "libavutil/dict.h"
 #include "libavutil/rational.h"
+#include "version_major.h"
 
 /** Data type identifiers for TIFF tags */
 enum AVTiffDataType {
@@ -130,8 +131,10 @@ void av_exif_free(AVExifMetadata *ifd);
  */
 int av_exif_ifd_to_dict(void *logctx, const AVExifMetadata *ifd, AVDictionary **metadata);
 
+#if FF_API_OLD_EXIF
 /* Used by the AVI demuxer */
 int avpriv_exif_decode_ifd(void *logctx, const uint8_t *buf, int size,
                            int le, int depth, AVDictionary **metadata);
+#endif /* FF_API_OLD_EXIF */
 
 #endif /* AVCODEC_EXIF_H */
