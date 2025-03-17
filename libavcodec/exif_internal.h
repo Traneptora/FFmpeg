@@ -59,4 +59,18 @@ int ff_exif_attach_buffer(void *logctx, AVFrame *frame, AVBufferRef *data, enum 
  */
 int ff_exif_attach_ifd(void *logctx, AVFrame *frame, const AVExifMetadata *ifd);
 
+/**
+ * Gets all relevant side data, collects it into an IFD, and writes it into the
+ * corresponding buffer pointer. This includes both AV_FRAME_DATA_EXIF and other
+ * side data types that are included in the frame data, such as possibly an
+ * instance of AV_FRAME_DATA_DISPLAYMATRIX. It also sets width and height tags
+ * to match those of the AVFrame if they are different.
+ *
+ * Upon error, *buffer will be NULL. The buffer becomes owned by the caller upon
+ * success. The *buffer argument must be NULL before calling. If *buffer is NULL
+ * upon return then a negative return value indicates an error, and a zero return
+ * value indicates that there was no EXIF data to write.
+ */
+int ff_exif_get_buffer(void *logctx, const AVFrame *frame, AVBufferRef **buffer, enum AVExifHeaderMode header_mode);
+
 #endif /* AVCODEC_EXIF_INTERNAL_H */
