@@ -694,7 +694,7 @@ static int attach_displaymatrix(void *logctx, AVFrame *frame, int orientation)
     int32_t *matrix;
     /* invalid orientation */
     if (orientation < 2 || orientation > 8)
-        return 0;
+        return AVERROR_INVALIDDATA;
     sd = av_frame_new_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX, sizeof(int32_t) * 9);
     if (!sd) {
         av_log(logctx, AV_LOG_ERROR, "Could not allocate frame side data\n");
@@ -702,37 +702,7 @@ static int attach_displaymatrix(void *logctx, AVFrame *frame, int orientation)
     }
     matrix = (int32_t *) sd->data;
 
-    switch (orientation) {
-    case 2:
-        av_display_rotation_set(matrix, 0.0);
-        av_display_matrix_flip(matrix, 1, 0);
-        break;
-    case 3:
-        av_display_rotation_set(matrix, 180.0);
-        break;
-    case 4:
-        av_display_rotation_set(matrix, 180.0);
-        av_display_matrix_flip(matrix, 1, 0);
-        break;
-    case 5:
-        av_display_rotation_set(matrix, 90.0);
-        av_display_matrix_flip(matrix, 1, 0);
-        break;
-    case 6:
-        av_display_rotation_set(matrix, 90.0);
-        break;
-    case 7:
-        av_display_rotation_set(matrix, -90.0);
-        av_display_matrix_flip(matrix, 1, 0);
-        break;
-    case 8:
-        av_display_rotation_set(matrix, -90.0);
-        break;
-    default:
-        av_assert0(0);
-    }
-
-    return 0;
+    return av_exif_orientation_to_matrix(matrix, orientation);
 }
 
 #define COLUMN_SEP(i, c) ((i) ? ((i) % (c) ? ", " : "\n") : "")
@@ -1090,14 +1060,14 @@ end:
     return ret;
 }
 
-static int exif_get_orientation(const int32_t *display_matrix)
+int av_exif_matrix_to_orientation(const int32_t *matrix)
 {
-    double rotation = av_display_rotation_get(display_matrix);
+    double rotation = av_display_rotation_get(matrix);
     // determinant
-    int vflip = ((int64_t)display_matrix[0] * (int64_t)display_matrix[4]
-               - (int64_t)display_matrix[1] * (int64_t)display_matrix[3]) < 0;
+    int vflip = ((int64_t)matrix[0] * (int64_t)matrix[4]
+               - (int64_t)matrix[1] * (int64_t)matrix[3]) < 0;
     if (!isfinite(rotation))
-        return 1;
+        return 0;
     if (vflip) {
         if (rotation > 181.0 || rotation > -179.0 && rotation < -89.0)
             return 5;
@@ -1115,6 +1085,44 @@ static int exif_get_orientation(const int32_t *display_matrix)
             return 8;
         return 1;
     }
+}
+
+int av_exif_orientation_to_matrix(int32_t *matrix, int orientation)
+{
+    switch (orientation) {
+        case 1:
+            av_display_rotation_set(matrix, 0.0);
+            break;
+        case 2:
+            av_display_rotation_set(matrix, 0.0);
+            av_display_matrix_flip(matrix, 1, 0);
+            break;
+        case 3:
+            av_display_rotation_set(matrix, 180.0);
+            break;
+        case 4:
+            av_display_rotation_set(matrix, 180.0);
+            av_display_matrix_flip(matrix, 1, 0);
+            break;
+        case 5:
+            av_display_rotation_set(matrix, 90.0);
+            av_display_matrix_flip(matrix, 1, 0);
+            break;
+        case 6:
+            av_display_rotation_set(matrix, 90.0);
+            break;
+        case 7:
+            av_display_rotation_set(matrix, -90.0);
+            av_display_matrix_flip(matrix, 1, 0);
+            break;
+        case 8:
+            av_display_rotation_set(matrix, -90.0);
+            break;
+        default:
+            return AVERROR(EINVAL);
+    }
+
+    return 0;
 }
 
 int ff_exif_get_buffer(void *logctx, const AVFrame *frame, AVBufferRef **buffer_ptr)
@@ -1145,7 +1153,7 @@ int ff_exif_get_buffer(void *logctx, const AVFrame *frame, AVBufferRef **buffer_
         return 0;
 
     if (sd_orient)
-        orientation = exif_get_orientation((int32_t *) sd_orient->data);
+        orientation = av_exif_matrix_to_orientation((int32_t *) sd_orient->data);
     if (orientation != 1)
         av_log(logctx, AV_LOG_DEBUG, "matrix contains nontrivial EXIF orientation: %" PRIu64 "\n", orientation);
 
