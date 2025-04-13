@@ -28,6 +28,7 @@
 
 #include "libavutil/avutil.h"
 #include "libavutil/csp.h"
+#include "libavutil/display.h"
 #include "libavutil/error.h"
 #include "libavutil/frame.h"
 #include "libavutil/libm.h"
@@ -40,6 +41,7 @@
 #include "avcodec.h"
 #include "encode.h"
 #include "codec_internal.h"
+#include "exif.h"
 
 #include <jxl/encode.h>
 #include <jxl/thread_parallel_runner.h>
@@ -303,8 +305,27 @@ static int libjxl_preprocess_stream(AVCodecContext *avctx, const AVFrame *frame,
     /* bitexact lossless requires there to be no XYB transform */
     info.uses_original_profile = ctx->distance == 0.0 || !ctx->xyb;
 
-    /* libjxl doesn't support negative linesizes so we use orientation to work around this */
-    info.orientation = frame->linesize[0] >= 0 ? JXL_ORIENT_IDENTITY : JXL_ORIENT_FLIP_VERTICAL;
+    sd = av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX);
+    if (sd) {
+        int32_t *matrix = (int32_t *) sd->data;
+        int orientation;
+        /* av_display_matrix_flip is a right-multipilcation */
+        /* i.e. flip is applied before the previous matrix */
+        if (frame->linesize < 0)
+            av_display_matrix_flip(matrix, 0, 1);
+        orientation = av_exif_matrix_to_orientation(matrix);
+        /* JPEG XL orientation flag agrees with EXIF for values 1-8 */
+        if (orientation)
+            info.orientation = orientation;
+        else
+            av_log(avctx, AV_LOG_WARNING, "singular displaymatrix data\n");
+        /* restore the previous value */
+        if (frame->linesize < 0)
+            av_display_matrix_flip(matrix, 0, 1);
+    } else {
+        /* libjxl doesn't support negative linesizes so we use orientation to work around this */
+        info.orientation = frame->linesize[0] >= 0 ? JXL_ORIENT_IDENTITY : JXL_ORIENT_FLIP_VERTICAL;
+    }
 
     if (animated) {
         info.have_animation = 1;
