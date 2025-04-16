@@ -1015,6 +1015,36 @@ end:
     return ret;
 }
 
+static int exif_get_entry(void *logctx, AVExifMetadata *ifd, uint16_t id, int depth, AVExifEntry **value)
+{
+    int offset = 1;
+
+    if (!ifd || ifd->entries && !ifd->count || ifd->count && !ifd->entries || !value)
+        return AVERROR(EINVAL);
+
+    for (size_t i = 0; i < ifd->count; i++) {
+        if (ifd->entries[i].id == id) {
+            *value = &ifd->entries[i];
+            return i + offset;
+        }
+        if (ifd->entries[i].type == AV_TIFF_IFD) {
+            if (depth < 3) {
+                int ret = exif_get_entry(logctx, &ifd->entries[i].value.ifd, id, depth + 1, value);
+                if (ret)
+                    return ret + offset;
+            }
+            offset += ifd->entries[i].value.ifd.count;
+        }
+    }
+
+    return 0;
+}
+
+int av_exif_get_entry(void *logctx, AVExifMetadata *ifd, uint16_t id, int recursive, AVExifEntry **value)
+{
+    return exif_get_entry(logctx, ifd, id, recursive ? 0 : INT_MAX, value);
+}
+
 int av_exif_set_entry(void *logctx, AVExifMetadata *ifd, uint16_t id, enum AVTiffDataType type,
     uint32_t count, const uint8_t *ifd_lead, uint32_t ifd_offset, const void *value)
 {
@@ -1028,12 +1058,9 @@ int av_exif_set_entry(void *logctx, AVExifMetadata *ifd, uint16_t id, enum AVTif
              || !value || ifd->count == 0xFFFFu)
         return AVERROR(EINVAL);
 
-    for (size_t i = 0; i < ifd->count; i++) {
-        if (ifd->entries[i].id == id) {
-            entry = &ifd->entries[i];
-            break;
-        }
-    }
+    ret = av_exif_get_entry(logctx, ifd, id, 0, &entry);
+    if (ret < 0)
+        return ret;
 
     if (entry) {
         exif_free_entry(entry);
